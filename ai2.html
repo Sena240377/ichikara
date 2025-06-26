@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ランダムマップ迂回路シミュレーター</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto+Sans+JP', 'Inter', sans-serif;
+            overflow: hidden;
+        }
+        .node {
+            width: 45px;
+            height: 45px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.8rem;
+            color: white;
+            background-color: #4B5563; /* gray-700 */
+            border: 3px solid white;
+            position: absolute;
+            z-index: 10;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+            transition: all 0.3s ease;
+        }
+        .node.path {
+            background-color: #3B82F6; /* blue-500 */
+            transform: translate(-50%, -50%) scale(1.15);
+        }
+        .edge {
+            stroke-width: 4;
+            transition: stroke 0.3s ease, stroke-width 0.2s ease;
+        }
+        .edge.path {
+            stroke: #3B82F6; /* blue-500 */
+            stroke-width: 7;
+            z-index: 5;
+        }
+    </style>
+</head>
+<body class="bg-gray-800 text-white h-screen">
+    <div class="flex flex-col md:flex-row h-full">
+        <div class="flex-grow bg-gray-900 relative" id="map-container">
+            <svg id="svg-canvas" class="absolute top-0 left-0 w-full h-full"></svg>
+            <div id="node-container" class="relative w-full h-full"></div>
+        </div>
+
+        <div id="info-panel" class="w-full md:w-96 bg-gray-800 p-4 shadow-2xl flex flex-col">
+            <div class="flex-shrink-0">
+                <div class="text-center mb-4">
+                    <h1 class="text-2xl font-bold text-blue-400">リアルタイム情報</h1>
+                    <p class="text-sm text-gray-400">ランダムな地図上で最適ルートを探索</p>
+                </div>
+                <div class="bg-gray-700 rounded-lg p-4 mb-4">
+                    <h2 class="text-lg font-semibold mb-2 text-gray-200">最適ルート</h2>
+                    <p id="optimal-path" class="text-blue-400 font-bold text-md break-words">-</p>
+                    <p id="total-cost" class="text-gray-300 mt-1">合計コスト: -</p>
+                </div>
+            </div>
+            
+            <div id="log-container" class="bg-gray-900 rounded-lg p-4 flex flex-col flex-grow min-h-0">
+                <h2 class="text-lg font-semibold mb-2 text-gray-200 flex-shrink-0">シミュレーションログ</h2>
+                <div id="logs" class="space-y-2 overflow-y-auto"></div>
+            </div>
+
+            <div class="mt-4 grid grid-cols-2 gap-2 flex-shrink-0">
+                <button id="toggle-simulation-btn" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-4 rounded-lg transition duration-300">
+                    開始
+                </button>
+                <button id="regenerate-map-btn" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-4 rounded-lg transition duration-300">
+                    新マップ生成
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        // --- DOM要素 ---
+        const nodeContainer = document.getElementById('node-container');
+        const svgCanvas = document.getElementById('svg-canvas');
+        const optimalPathEl = document.getElementById('optimal-path');
+        const totalCostEl = document.getElementById('total-cost');
+        const logsEl = document.getElementById('logs');
+        const toggleBtn = document.getElementById('toggle-simulation-btn');
+        const regenerateBtn = document.getElementById('regenerate-map-btn');
+
+        // --- 状態管理 ---
+        let costs = {};
+        let nodeElements = {};
+        let edgeElements = {};
+        let simulationInterval = null;
+        let nodes, edges; // マップ構造をグローバルに保持
+
+        // --- ランダムマップ生成 ---
+        function generateRandomGraph() {
+            const newNodes = { 'X': { layer: 0, id: 'X' }, 'Y': { layer: 5, id: 'Y' } };
+            const newEdges = [];
+            const nodeLayers = [['X']];
+
+            const minNodesPerLayer = 2;
+            const maxNodesPerLayer = 4;
+
+            // 中間層のノードを生成
+            for (let i = 1; i <= 4; i++) {
+                const layerNodes = [];
+                const numNodes = Math.floor(Math.random() * (maxNodesPerLayer - minNodesPerLayer + 1)) + minNodesPerLayer;
+                for (let j = 0; j < numNodes; j++) {
+                    const nodeId = `L${i}N${j}`;
+                    newNodes[nodeId] = { layer: i, id: nodeId };
+                    layerNodes.push(nodeId);
+                }
+                nodeLayers.push(layerNodes);
+            }
+            nodeLayers.push(['Y']);
+
+            // エッジを生成
+            for (let i = 0; i < nodeLayers.length - 1; i++) {
+                const currentLayer = nodeLayers[i];
+                const nextLayer = nodeLayers[i + 1];
+
+                // 1. 次の層への接続を保証
+                currentLayer.forEach(fromNode => {
+                    const toNode = nextLayer[Math.floor(Math.random() * nextLayer.length)];
+                    newEdges.push(`${fromNode}-${toNode}`);
+                });
+                
+                // 2. 追加のランダムな順方向接続
+                const extraConnections = Math.floor(currentLayer.length * nextLayer.length * 0.3);
+                for (let k = 0; k < extraConnections; k++) {
+                   const fromNode = currentLayer[Math.floor(Math.random() * currentLayer.length)];
+                   const toNode = nextLayer[Math.floor(Math.random() * nextLayer.length)];
+                   if (newEdges.indexOf(`${fromNode}-${toNode}`) === -1) {
+                       newEdges.push(`${fromNode}-${toNode}`);
+                   }
+                }
+                
+                // 3. 同じ層内の接続 (中間層のみ)
+                if (i > 0 && i < nodeLayers.length - 2 && nodeLayers[i].length > 1) {
+                    const fromNode = nodeLayers[i][Math.floor(Math.random() * nodeLayers[i].length)];
+                    const toNode = nodeLayers[i][Math.floor(Math.random() * nodeLayers[i].length)];
+                    if (fromNode !== toNode && newEdges.indexOf(`${fromNode}-${toNode}`) === -1) {
+                        newEdges.push(`${fromNode}-${toNode}`);
+                    }
+                }
+            }
+
+            return { nodes: newNodes, edges: [...new Set(newEdges)] };
+        }
+        
+        // --- 初期化 & リセット ---
+        function resetAndGenerate() {
+            if (simulationInterval) {
+                clearInterval(simulationInterval);
+                simulationInterval = null;
+                toggleBtn.textContent = '再開';
+                toggleBtn.classList.remove('bg-red-500', 'hover:bg-red-600');
+                toggleBtn.classList.add('bg-blue-500', 'hover:bg-blue-600');
+            }
+            nodeContainer.innerHTML = '';
+            svgCanvas.innerHTML = '';
+            logsEl.innerHTML = '';
+            costs = {};
+            nodeElements = {};
+            edgeElements = {};
+            const graph = generateRandomGraph();
+            nodes = graph.nodes;
+            edges = graph.edges;
+            init();
+            addLog('新しいランダムマップが生成されました。', 'info');
+        }
+
+        // --- UI初期化 ---
+        function init() {
+            const nodeLayers = {};
+            for (const id in nodes) {
+                const node = nodes[id];
+                if (!nodeLayers[node.layer]) nodeLayers[node.layer] = [];
+                nodeLayers[node.layer].push(id);
+            }
+
+            for (const layer in nodeLayers) {
+                const layerNodeIds = nodeLayers[layer];
+                layerNodeIds.forEach((nodeId, index) => {
+                    const el = document.createElement('div');
+                    el.id = `node-${nodeId}`;
+                    el.className = 'node';
+                    const xPos = (parseInt(layer) * 16) + 10;
+                    const yPos = (index + 1) * (100 / (layerNodeIds.length + 1));
+                    el.style.left = `${xPos}%`;
+                    el.style.top = `${yPos}%`;
+                    el.style.transform = `translate(-50%, -50%)`;
+                    el.textContent = nodeId;
+                    nodeContainer.appendChild(el);
+                    nodeElements[nodeId] = el;
+                });
+            }
+
+            edges.forEach(edgeId => {
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.id = `edge-${edgeId}`;
+                line.classList.add('edge');
+                svgCanvas.appendChild(line);
+                edgeElements[edgeId] = line;
+                costs[edgeId] = Math.floor(Math.random() * 15) + 5;
+            });
+            
+            redrawEdges();
+            updateCostsAndPath();
+            window.addEventListener('resize', redrawEdges);
+        }
+        
+        function redrawEdges() {
+             const containerRect = nodeContainer.getBoundingClientRect();
+             for(const edgeId in edgeElements) {
+                const [from, to] = edgeId.split('-');
+                if (!nodeElements[from] || !nodeElements[to]) continue;
+                const fromEl = nodeElements[from].getBoundingClientRect();
+                const toEl = nodeElements[to].getBoundingClientRect();
+                const line = edgeElements[edgeId];
+                
+                line.setAttribute('x1', fromEl.left + fromEl.width / 2 - containerRect.left);
+                line.setAttribute('y1', fromEl.top + fromEl.height / 2 - containerRect.top);
+                line.setAttribute('x2', toEl.left + toEl.width / 2 - containerRect.left);
+                line.setAttribute('y2', toEl.top + toEl.height / 2 - containerRect.top);
+             }
+        }
+
+        // --- シミュレーション ---
+        function toggleSimulation() {
+            if (simulationInterval) {
+                clearInterval(simulationInterval);
+                simulationInterval = null;
+                toggleBtn.textContent = '再開';
+                toggleBtn.classList.remove('bg-red-500', 'hover:bg-red-600');
+                toggleBtn.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                addLog('シミュレーションを一時停止しました。', 'info');
+            } else {
+                toggleBtn.textContent = '停止';
+                toggleBtn.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                toggleBtn.classList.add('bg-red-500', 'hover:bg-red-600');
+                addLog('シミュレーションを開始しました。', 'info');
+                simulationInterval = setInterval(simulateTrafficChange, 2500);
+            }
+        }
+
+        function simulateTrafficChange() {
+            if (edges.length === 0) return;
+            const edgeToChange = edges[Math.floor(Math.random() * edges.length)];
+            if (Math.random() > 0.4 && costs[edgeToChange] < 30) {
+                 costs[edgeToChange] = Math.floor(Math.random() * 40) + 30;
+                 addLog(`渋滞発生: ${edgeToChange} の通行が困難に。`, 'danger');
+            } else if (costs[edgeToChange] > 20) {
+                 costs[edgeToChange] = Math.floor(Math.random() * 15) + 5;
+                 addLog(`渋滞緩和: ${edgeToChange} の流れが改善。`, 'success');
+            }
+            updateCostsAndPath();
+        }
+
+        // --- ここからが修正箇所 ---
+        function updateCostsAndPath() {
+            // 先に最短経路を計算する
+            const result = findShortestPath();
+
+            // 最短経路上のエッジをSetに保存して、高速にチェックできるようにする
+            const pathEdges = new Set();
+            if (result.path && result.path.length > 1) {
+                for (let i = 1; i < result.path.length; i++) {
+                    pathEdges.add(`${result.path[i - 1]}-${result.path[i]}`);
+                }
+            }
+
+            // 全てのエッジの色とスタイルを設定する
+            for (const edgeId in edgeElements) {
+                const edgeEl = edgeElements[edgeId];
+                if (!edgeEl) continue;
+
+                if (pathEdges.has(edgeId)) {
+                    // 最短経路上のエッジの場合
+                    edgeEl.classList.add('path');
+                    // インラインスタイルを削除して、CSSクラスのスタイル（青色、太線）が適用されるようにする
+                    edgeEl.style.stroke = ''; 
+                } else {
+                    // 最短経路ではないエッジの場合
+                    edgeEl.classList.remove('path');
+                    // コストに応じて色を決定する
+                    const cost = costs[edgeId];
+                    if (cost > 40) {
+                        edgeEl.style.stroke = '#EF4444'; // Red
+                    } else if (cost > 25) {
+                        edgeEl.style.stroke = '#F59E0B'; // Amber
+                    } else {
+                        edgeEl.style.stroke = '#6B7280'; // Gray
+                    }
+                }
+            }
+            
+            // UIのテキスト情報やノードのハイライトを更新する
+            updateUI(result);
+        }
+
+        // --- ダイクストラ法による最短経路探索 ---
+        function findShortestPath() {
+            const graph = {};
+            for(const edgeId in costs) {
+                const [from, to] = edgeId.split('-');
+                if(!graph[from]) graph[from] = {};
+                graph[from][to] = costs[edgeId];
+            }
+            const distances = {}, parents = {}, processed = [];
+            Object.keys(nodes).forEach(node => {
+                distances[node] = Infinity;
+                parents[node] = null;
+            });
+            distances['X'] = 0;
+            let node = findLowestCostNode(distances, processed);
+            while(node) {
+                let distance = distances[node];
+                let neighbors = graph[node] || {};
+                for(let n in neighbors) {
+                    let newDistance = distance + neighbors[n];
+                    if(distances[n] > newDistance) {
+                        distances[n] = newDistance;
+                        parents[n] = node;
+                    }
+                }
+                processed.push(node);
+                node = findLowestCostNode(distances, processed);
+            }
+            const path = [];
+            let parent = 'Y';
+            while(parent) { path.unshift(parent); parent = parents[parent]; }
+            return { path, cost: distances['Y'] };
+        }
+        
+        function findLowestCostNode(distances, processed) {
+             return Object.keys(distances).reduce((lowest, node) => {
+                if (lowest === null || distances[node] < distances[lowest]) {
+                    if (!processed.includes(node)) { lowest = node; }
+                }
+                return lowest;
+            }, null);
+        }
+
+        // updateUIはノードの更新とテキスト表示に専念
+        function updateUI(result) {
+            // 全てのノードのハイライトを一旦リセット
+            document.querySelectorAll('.node.path').forEach(el => el.classList.remove('path'));
+            
+            if (result.path.length > 1 && result.cost !== Infinity) {
+                // 最適ルート上のノードに .path クラスを付与
+                for (let i = 0; i < result.path.length; i++) {
+                    nodeElements[result.path[i]]?.classList.add('path');
+                }
+                optimalPathEl.textContent = result.path.join(' → ');
+                totalCostEl.textContent = `合計コスト: ${Math.round(result.cost)}`;
+            } else {
+                optimalPathEl.textContent = '経路が見つかりません';
+                totalCostEl.textContent = '合計コスト: -';
+            }
+        }
+        // --- ここまでが修正箇所 ---
+        
+        function addLog(message, type) {
+            const logEl = document.createElement('p');
+            const now = new Date();
+            const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+            let colorClass = 'text-gray-400';
+            if (type === 'danger') colorClass = 'text-red-400';
+            if (type === 'success') colorClass = 'text-green-400';
+            if (type === 'info') colorClass = 'text-blue-400';
+            logEl.className = `text-sm ${colorClass}`;
+            logEl.innerHTML = `<span class="font-mono">${timeString}</span>: ${message}`;
+            logsEl.insertBefore(logEl, logsEl.firstChild);
+            const MAX_LOGS = 50;
+            while (logsEl.childElementCount > MAX_LOGS) {
+                logsEl.removeChild(logsEl.lastChild);
+            }
+        }
+
+        toggleBtn.addEventListener('click', toggleSimulation);
+        regenerateBtn.addEventListener('click', resetAndGenerate);
+
+        resetAndGenerate();
+    });
+    </script>
+</body>
+</html>
